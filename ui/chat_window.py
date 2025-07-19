@@ -109,7 +109,9 @@ class ChatWindow(QWidget):
         self.title.setText("<h2 style='color:#8fb3ff; margin:0;'>🧠 ArtisanCopilotePlus</h2>")
         self.title.setStyleSheet("background:transparent; border:none; padding-bottom:0px;color:#8fb3ff;")
         # Historique de chat
-        self.history = QTextEdit()
+        # Utiliser QTextBrowser pour permettre les liens cliquables
+        from PyQt5.QtWidgets import QTextBrowser
+        self.history = QTextBrowser()
         self.history.setReadOnly(True)
         self.history.setStyleSheet("margin-bottom:10px;")
         # Champ de saisie
@@ -148,6 +150,14 @@ class ChatWindow(QWidget):
         # Liste des projets sélectionnés (paths)
         self.projets = []
         self.projet_courant = None
+        # Pour gestion des liens Copy/Run
+        self._last_code_blocks = []
+        # self.history.setOpenExternalLinks(False)  # QTextEdit n'a pas cette méthode
+        self.history.anchorClicked.connect(self._handle_anchor_click)
+
+    def ouvrir_fichier(self):
+        # Ouvre une boîte de dialogue pour choisir un fichier à ouvrir (placeholder)
+        QFileDialog.getOpenFileName(self, "Ouvrir un fichier")
 
     def ajouter_dossier_projet(self):
         chemin = QFileDialog.getExistingDirectory(self, "Sélectionner un dossier de projet")
@@ -232,24 +242,69 @@ class ChatWindow(QWidget):
                 projets_ouverts=self.projets if self.projets else ([self.projet_courant] if self.projet_courant else None)
             )
             # Affichage bulle IA (dark, claire, markdown-friendly)
+            import re
+            code_blocks = re.findall(r'```(.*?)```', reponse, re.DOTALL)
+            self._last_code_blocks = code_blocks  # Stocker les extraits de code pour accès par index
             self.history.append(f"<div style='background:#22242a;padding:13px 16px;border-radius:12px;max-width:82%;margin:10px auto 10px 0;text-align:left;color:#ffeac2;font-size:15px;line-height:1.6;'><b>IA :</b><br>{self._format_ia_response(reponse)}</div>")
+            self.history.anchorClicked.connect(self._handle_anchor_click)  # Connecter anchorClicked à un slot
             self.history.moveCursor(self.history.textCursor().End)
 
     def _format_ia_response(self, texte):
-        # Améliore l'affichage : sauts de ligne, code, titres, listes (markdown simplifié)
-        import html
-        t = html.escape(texte)
+        """
+        Améliore l'affichage des réponses IA :
+        - Bloc réflexion IA stylé si <details><summary>...> trouvé
+        - Titres, sous-titres, listes markdown
+        - Blocs code/terminal améliorés
+        - Rendu moderne et lisible
+        """
+        import html, re
+        t = texte
+        # 1. Supprimer complètement la réflexion IA (<details><summary>...>...</details>)
+        t = re.sub(r'<details><summary>.*?</summary>.*?</details>', '', t, flags=re.DOTALL)
+        # 2. Code blocks (```lang\n...```)
+        code_blocks = re.findall(r'```([a-zA-Z0-9]*)\n(.*?)```', t, re.DOTALL)
+        for idx, (lang, code) in enumerate(code_blocks):
+            is_command = lang.lower() in ('bash','sh','zsh','shell') or code.strip().startswith('$') or code.strip().startswith('!')
+            code_html = (
+                f'<div style="position:relative;background:#181c24;border-radius:10px;box-shadow:0 2px 8px #0004;padding:10px 12px 12px 12px;margin:14px 0 10px 0;transition:box-shadow 0.2s;">'
+                f'<pre style="margin:0;font-size:14px;color:#b2e1ff;">{html.escape(code)}</pre>'
+                f'<a href="copy:{idx}" style="position:absolute;top:8px;right:54px;font-size:11px;padding:2px 8px;border-radius:6px;background:#4f8cff;color:white;text-decoration:none;opacity:0.85;">Copy</a>'
+            )
+            if is_command:
+                code_html += (
+                    f'<a href="run:{idx}" style="position:absolute;top:8px;right:8px;font-size:11px;padding:2px 8px;border-radius:6px;background:#34c759;color:white;text-decoration:none;opacity:0.85;">Run</a>'
+                )
+            code_html += "</div>"
+            t = t.replace(f'```{lang}\n{code}```', code_html)
+        # 3. Titres markdown
+        t = re.sub(r'^# (.*?)<br>', r'<div style="font-size:21px;font-weight:bold;color:#8fb3ff;margin:16px 0 8px 0;">\1</div>', t, flags=re.MULTILINE)
+        t = re.sub(r'^## (.*?)<br>', r'<div style="font-size:18px;font-weight:bold;color:#6bc1ff;margin:12px 0 6px 0;">\1</div>', t, flags=re.MULTILINE)
+        t = re.sub(r'^### (.*?)<br>', r'<div style="font-size:16px;font-weight:bold;color:#4f8cff;margin:8px 0 4px 0;">\1</div>', t, flags=re.MULTILINE)
+        # 4. Listes markdown
+        t = re.sub(r'(<br>|^)\s*[-*] (.*?)<br>', r'\1<div style="margin-left:22px;">• \2</div>', t)
+        t = re.sub(r'(<br>|^)\s*\d+\. (.*?)<br>', r'\1<div style="margin-left:22px;">◦ \2</div>', t)
+        # 5. Gras, italique
+        t = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', t)
+        t = re.sub(r'__(.*?)__', r'<b>\1</b>', t)
+        t = re.sub(r'\*(.*?)\*', r'<i>\1</i>', t)
+        # 6. Sauts de ligne, indentation
         t = t.replace('\n', '<br>')
         t = t.replace('    ', '&nbsp;&nbsp;&nbsp;&nbsp;')
-        t = t.replace('**', '<b>').replace('__', '<b>')
-        t = t.replace('```', '<br><span style="background:#181c24;border-radius:6px;padding:4px 8px;display:inline-block;">')
-        t = t.replace('* ', '• ')
-        return t
-    def ouvrir_fichier(self):
-        QFileDialog.getOpenFileName(self, "Ouvrir un fichier")
+        # 7. Nettoyage
+        t = t.replace('<br><br>', '<br>')
+        # 8. Rendu final : uniquement la réponse sans réflexion
+        return t.strip()
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    win = ChatWindow()
-    win.show()
-    sys.exit(app.exec_())
+    def _handle_anchor_click(self, url):
+        # Slot pour gérer les clics sur les liens copy:/run:
+        scheme = url.scheme()
+        path = url.path().lstrip('/')
+        try:
+            idx = int(path)
+        except Exception:
+            return
+        if hasattr(self, '_last_code_blocks') and idx < len(self._last_code_blocks):
+            if scheme == 'copy':
+                self.copy_code_to_clipboard(self._last_code_blocks[idx])
+            elif scheme == 'run':
+                self.execute_command(self._last_code_blocks[idx])
